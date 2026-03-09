@@ -1,16 +1,25 @@
+# 演示如何为 Agent 注册多个工具，并让 Agent 自主选择合适的工具完成任务
+# 每个工具都调用了真实的外部 API（需要替换 API Key 才能运行）
+
 import requests
 
 # from smolagents.agents import ToolCallingAgent
 from smolagents import CodeAgent, InferenceClientModel, tool
 
 
-# Choose which LLM engine to use!
+# 使用 HuggingFace 推理 API（需要 HF_TOKEN 环境变量）
+# 不指定 model_id 时使用默认模型
 model = InferenceClientModel()
-# model = TransformersModel(model_id="meta-llama/Llama-3.2-2B-Instruct")
+# model = TransformersModel(model_id="meta-llama/Llama-3.2-2B-Instruct")  # 本地模型备选
 
 # For anthropic: change model_id below to 'anthropic/claude-3-5-sonnet-20240620'
 # model = LiteLLMModel(model_id="gpt-5")
 
+
+# ============================================================
+# 工具定义：每个 @tool 函数都是 Agent 可调用的能力
+# 注意：所有参数必须有类型注解，Args 文档必须完整，否则工具注册失败
+# ============================================================
 
 @tool
 def get_weather(location: str, celsius: bool | None = False) -> str:
@@ -108,6 +117,7 @@ def get_news_headlines() -> str:
         if not articles:
             return "No news available at the moment."
 
+        # 只取前 5 条新闻标题，避免返回内容过长超出 LLM 上下文
         headlines = [f"{article['title']} - {article['source']['name']}" for article in articles[:5]]
         return "\n".join(headlines)
 
@@ -125,6 +135,7 @@ def get_joke() -> str:
     Returns:
         str: The joke as a string, or an error message if the joke could not be fetched.
     """
+    # type=single：只请求单行笑话，避免解析复杂的两段式笑话结构
     url = "https://v2.jokeapi.dev/joke/Any?type=single"
 
     try:
@@ -133,6 +144,7 @@ def get_joke() -> str:
 
         data = response.json()
 
+        # JokeAPI 返回两种格式：单行笑话（joke）或两段式笑话（setup + delivery）
         if "joke" in data:
             return data["joke"]
         elif "setup" in data and "delivery" in data:
@@ -155,6 +167,7 @@ def get_time_in_timezone(location: str) -> str:
     Raises:
         requests.exceptions.RequestException: If there is an issue with the HTTP request.
     """
+    # location 格式示例："Asia/Shanghai"、"America/New_York"、"Europe/London"
     url = f"http://worldtimeapi.org/api/timezone/{location}.json"
 
     try:
@@ -202,6 +215,8 @@ def search_wikipedia(query: str) -> str:
     Raises:
         requests.exceptions.RequestException: If there is an issue with the HTTP request.
     """
+    # Wikipedia REST API：直接按标题查询，返回摘要段落
+    # 注意：query 需要是英文且接近 Wikipedia 页面标题，否则可能 404
     url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{query}"
 
     try:
@@ -218,8 +233,11 @@ def search_wikipedia(query: str) -> str:
         return f"Error fetching Wikipedia data: {str(e)}"
 
 
-# If you want to use the ToolCallingAgent instead, uncomment the following lines as they both will work
+# ============================================================
+# 创建 Agent 并注册所有工具
+# ============================================================
 
+# 备选：ToolCallingAgent 以 JSON 格式调用工具，适合简单场景
 # agent = ToolCallingAgent(
 #     tools=[
 #         convert_currency,
@@ -232,7 +250,8 @@ def search_wikipedia(query: str) -> str:
 #     model=model,
 # )
 
-
+# CodeAgent：LLM 生成 Python 代码来调用工具，支持多工具组合和复杂逻辑
+# 例如：先查汇率，再做计算，最后格式化输出 —— 这种多步组合 CodeAgent 更擅长
 agent = CodeAgent(
     tools=[
         convert_currency,
@@ -243,12 +262,12 @@ agent = CodeAgent(
         search_wikipedia,
     ],
     model=model,
-    stream_outputs=True,
+    stream_outputs=True,  # 实时流式输出 LLM 生成的代码和思考过程
 )
 
-# Uncomment the line below to run the agent with a specific query
-
+# 运行 Agent，LLM 会自动从上面注册的工具中选择 convert_currency 来完成任务
 agent.run("Convert 5000 dollars to Euros")
+# 以下是其他可尝试的查询示例（取消注释即可运行）：
 # agent.run("What is the weather in New York?")
 # agent.run("Give me the top news headlines")
 # agent.run("Tell me a joke")
