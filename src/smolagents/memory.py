@@ -346,17 +346,17 @@ class FinalAnswerStep(MemoryStep):
 
 
 class AgentMemory:
-    """Memory for the agent, containing the system prompt and all steps taken by the agent.
+    """Agent 的记忆容器，保存系统提示词以及执行过程中产生的所有步骤。
 
-    This class is used to store the agent's steps, including tasks, actions, and planning steps.
-    It allows for resetting the memory, retrieving succinct or full step information, and replaying the agent's steps.
+    该类用于记录 Agent 的运行轨迹，包括任务步骤、行动步骤和规划步骤。
+    它支持重置记忆、获取简略版或完整版步骤信息，以及回放整个执行过程。
 
     Args:
-        system_prompt (`str`): System prompt for the agent, which sets the context and instructions for the agent's behavior.
+        system_prompt (`str`): Agent 的系统提示词，用于设定行为上下文和基础指令。
 
     **Attributes**:
-        - **system_prompt** (`SystemPromptStep`) -- System prompt step for the agent.
-        - **steps** (`list[TaskStep | ActionStep | PlanningStep]`) -- List of steps taken by the agent, which can include tasks, actions, and planning steps.
+        - **system_prompt** (`SystemPromptStep`) -- Agent 的系统提示词步骤。
+        - **steps** (`list[TaskStep | ActionStep | PlanningStep]`) -- Agent 已执行的步骤列表，可能包含任务、行动和规划步骤。
     """
 
     def __init__(self, system_prompt: str):
@@ -364,28 +364,28 @@ class AgentMemory:
         self.steps: list[TaskStep | ActionStep | PlanningStep] = []
 
     def reset(self):
-        """Reset the agent's memory, clearing all steps and keeping the system prompt."""
+        """重置 Agent 的记忆，清空所有步骤，但保留系统提示词。"""
         self.steps = []
 
     def get_succinct_steps(self) -> list[dict]:
-        """Return a succinct representation of the agent's steps, excluding model input messages."""
+        """返回步骤的精简表示，不包含传给模型的输入消息。"""
         return [
             {key: value for key, value in step.dict().items() if key != "model_input_messages"} for step in self.steps
         ]
 
     def get_full_steps(self) -> list[dict]:
-        """Return a full representation of the agent's steps, including model input messages."""
+        """返回步骤的完整表示，包含传给模型的输入消息。"""
         if len(self.steps) == 0:
             return []
         return [step.dict() for step in self.steps]
 
     def replay(self, logger: AgentLogger, detailed: bool = False):
-        """Prints a pretty replay of the agent's steps.
+        """以较易读的形式回放 Agent 的执行步骤。
 
         Args:
-            logger (`AgentLogger`): The logger to print replay logs to.
-            detailed (`bool`, default `False`): If True, also displays the memory at each step. Defaults to False.
-                Careful: will increase log length exponentially. Use only for debugging.
+            logger (`AgentLogger`): 用于输出回放日志的记录器。
+            detailed (`bool`, default `False`): 若为 True，还会展示每一步对应的记忆内容。
+                注意：这会显著增加日志长度，建议仅在调试时使用。
         """
         logger.console.log("Replaying the agent's steps:")
         logger.log_markdown(title="System prompt", content=self.system_prompt.system_prompt, level=LogLevel.ERROR)
@@ -405,46 +405,102 @@ class AgentMemory:
                 logger.log_markdown(title="Agent output:", content=step.plan, level=LogLevel.ERROR)
 
     def return_full_code(self) -> str:
-        """Returns all code actions from the agent's steps, concatenated as a single script."""
+        """返回 Agent 各步骤中的所有代码动作，并拼接成一个脚本。"""
         return "\n\n".join(
             [step.code_action for step in self.steps if isinstance(step, ActionStep) and step.code_action is not None]
         )
 
 
 class CallbackRegistry:
-    """Registry for callbacks that are called at each step of the agent's execution.
+    """用于管理 Agent 每一步执行后要触发的回调函数。
 
-    Callbacks are registered by passing a step class and a callback function.
+    你可以把它理解成一个“按步骤类型分发事件”的小型注册中心。
+
+    工作方式分为两步：
+    1. 通过 `register(step_cls, callback)` 注册回调函数
+       表示“当某种步骤执行完成后，要调用这个函数”。
+    2. 通过 `callback(memory_step, **kwargs)` 触发回调
+       会根据 `memory_step` 的实际类型，把匹配的回调函数逐个执行。
+
+    内部数据结构：
+        `_callbacks` 是一个字典，结构如下：
+
+        {
+            ActionStep: [callback_a, callback_b],
+            PlanningStep: [callback_c],
+            MemoryStep: [callback_d],
+        }
+
+        含义是：
+        - 当完成 `ActionStep` 时，触发 `callback_a` 和 `callback_b`
+        - 当完成 `PlanningStep` 时，触发 `callback_c`
+        - 当完成任意 `MemoryStep` 子类步骤时，也会触发 `callback_d`
+
+    为什么会触发父类上的回调：
+        在触发时，代码会沿着 `memory_step` 的继承链（`__mro__`）向上查找。
+        例如某一步是 `ActionStep`，那么不仅会执行注册到 `ActionStep` 上的回调，
+        也会执行注册到其父类 `MemoryStep` 上的回调。
+
+    这样设计的好处是：
+        - 可以只监听某一种具体步骤
+        - 也可以统一监听所有步骤
+        - 不需要把日志、监控、UI 更新等附加逻辑硬编码到主流程里
     """
 
     def __init__(self):
+        # 结构：{步骤类型: [该类型对应的回调函数列表]}
         self._callbacks: dict[Type[MemoryStep], list[Callable]] = {}
 
     def register(self, step_cls: Type[MemoryStep], callback: Callable):
-        """Register a callback for a step class.
+        """为某种步骤类型注册回调函数。
 
         Args:
-            step_cls (Type[MemoryStep]): Step class to register the callback for.
-            callback (Callable): Callback function to register.
+            step_cls (Type[MemoryStep]): 要注册回调的步骤类型。
+            callback (Callable): 要注册的回调函数。
+
+        Example:
+            `register(ActionStep, my_callback)` 表示：
+            每当一个 `ActionStep` 执行完成后，都调用一次 `my_callback`。
         """
         if step_cls not in self._callbacks:
             self._callbacks[step_cls] = []
         self._callbacks[step_cls].append(callback)
 
     def callback(self, memory_step, **kwargs):
-        """Call callbacks registered for a step type.
+        """触发某个步骤类型已注册的回调函数。
 
         Args:
-            memory_step (MemoryStep): Step to call the callbacks for.
-            **kwargs: Additional arguments to pass to callbacks that accept them.
-                Typically, includes the agent instance.
+            memory_step (MemoryStep): 当前完成的步骤对象，将据此查找并执行对应回调。
+            **kwargs: 传递给回调函数的额外参数。
+                通常会包含当前 agent 实例等上下文信息。
 
         Notes:
-            For backwards compatibility, callbacks with a single parameter signature
-            receive only the memory_step, while callbacks with multiple parameters
-            receive both the memory_step and any additional kwargs.
+            为了兼容旧版回调：
+            如果回调函数只接收一个参数，则仅传入 `memory_step`；
+            如果回调函数接收多个参数，则同时传入 `memory_step` 和额外的 `kwargs`。
+
+        执行流程：
+            1. 读取 `memory_step` 的实际类型，例如 `ActionStep`
+            2. 沿着该类型的继承链向上查找，例如：
+               `ActionStep -> MemoryStep -> object`
+            3. 对每个类型，取出已注册的回调列表
+            4. 将这些回调逐个执行
+
+        Example:
+            假设注册了：
+            - `register(ActionStep, on_action)`
+            - `register(MemoryStep, on_any_step)`
+
+            当传入一个 `ActionStep` 时：
+            - `on_action(...)` 会被调用
+            - `on_any_step(...)` 也会被调用
         """
-        # For compatibility with old callbacks that only take the step as an argument
+        # 兼容旧版只接收一个 step 参数的回调写法
+        # __mro__ 表示类的继承链，例如：
+        # ActionStep.__mro__ == (ActionStep, MemoryStep, object)
+        # 因此这里既会触发注册在具体子类上的回调，也会触发注册在父类上的回调。
         for cls in memory_step.__class__.__mro__:
             for cb in self._callbacks.get(cls, []):
+                # 如果回调函数只定义了一个参数，就只传入当前步骤。
+                # 如果回调函数还定义了更多参数，则把额外上下文 kwargs 也一起传入。
                 cb(memory_step) if len(inspect.signature(cb).parameters) == 1 else cb(memory_step, **kwargs)
